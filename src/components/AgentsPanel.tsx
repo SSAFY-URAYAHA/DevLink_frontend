@@ -1,0 +1,370 @@
+import { useEffect, useId, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
+import { api } from '../lib/api'
+import type { Agent, CreateAgentInput, Team, TeamMember } from '../lib/api'
+import { copyText, formatDate } from '../lib/utils'
+import { EmptyState, Icon, Modal } from './ui'
+
+interface AgentsPanelProps {
+  team: Team
+  agents: Agent[]
+  members: TeamMember[]
+  currentUserId: number
+  loading: boolean
+  onRefresh: () => void
+  onError: (error: unknown) => void
+  onNotice: (message: string) => void
+}
+
+interface AgentForm {
+  name: string
+  roleDescription: string
+  projectName: string
+  toolType: CreateAgentInput['toolType']
+}
+
+interface DetailState {
+  agent: Agent | null
+  loading: boolean
+  error: string | null
+}
+
+const emptyForm: AgentForm = {
+  name: '',
+  roleDescription: '',
+  projectName: '',
+  toolType: 'CODEX',
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '요청을 처리하지 못했습니다. 잠시 후 다시 확인해주세요.'
+}
+
+function toolName(toolType: Agent['toolType']): string {
+  return toolType === 'CODEX' ? 'Codex' : 'Claude Code'
+}
+
+export default function AgentsPanel({
+  team, agents, members, currentUserId, loading, onRefresh, onError, onNotice,
+}: AgentsPanelProps) {
+  const fieldId = useId()
+  const active = useRef(true)
+  const detailRequest = useRef(0)
+  const [search, setSearch] = useState('')
+  const [registerOpen, setRegisterOpen] = useState(false)
+  const [form, setForm] = useState<AgentForm>(emptyForm)
+  const [registering, setRegistering] = useState(false)
+  const [registerError, setRegisterError] = useState<string | null>(null)
+  const [detail, setDetail] = useState<DetailState | null>(null)
+  const [tokenAgent, setTokenAgent] = useState<Agent | null>(null)
+  const [issuedToken, setIssuedToken] = useState<string | null>(null)
+  const [tokenVisible, setTokenVisible] = useState(false)
+  const [issuing, setIssuing] = useState(false)
+  const [tokenError, setTokenError] = useState<string | null>(null)
+
+  useEffect(() => {
+    active.current = true
+    return () => { active.current = false }
+  }, [])
+
+  const query = search.trim().toLocaleLowerCase()
+  const teamAgents = agents.filter((agent) => agent.teamId === team.teamId)
+  const visibleAgents = teamAgents.filter((agent) =>
+    [agent.name, agent.projectName, agent.roleDescription ?? '']
+      .some((value) => value.toLocaleLowerCase().includes(query)),
+  )
+
+  function ownerName(agent: Agent): string {
+    const owner = members.find((member) => member.userId === agent.ownerUserId)
+    return owner?.nickname || owner?.name || `사용자 #${agent.ownerUserId}`
+  }
+
+  function openRegister() {
+    setForm(emptyForm)
+    setRegisterError(null)
+    setRegisterOpen(true)
+  }
+
+  async function registerAgent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (registering) return
+    const name = form.name.trim()
+    const projectName = form.projectName.trim()
+    const roleDescription = form.roleDescription.trim()
+    if (!name || !projectName) {
+      setRegisterError('Agent 이름과 프로젝트명을 입력해주세요.')
+      return
+    }
+    setRegistering(true)
+    setRegisterError(null)
+    try {
+      await api.registerAgent(team.teamId, {
+        name, projectName, toolType: form.toolType,
+        ...(roleDescription ? { roleDescription } : {}),
+      })
+      if (!active.current) return
+      setRegisterOpen(false)
+      setForm(emptyForm)
+      onNotice('내 Agent를 팀에 등록했습니다.')
+      onRefresh()
+    } catch (error) {
+      if (!active.current) return
+      setRegisterError(errorMessage(error))
+      onError(error)
+    } finally {
+      if (active.current) setRegistering(false)
+    }
+  }
+
+  async function showDetail(agentId: number) {
+    const requestId = ++detailRequest.current
+    setDetail({ agent: null, loading: true, error: null })
+    try {
+      const agent = await api.getAgent(agentId)
+      if (active.current && detailRequest.current === requestId) {
+        setDetail({ agent, loading: false, error: null })
+      }
+    } catch (error) {
+      if (!active.current || detailRequest.current !== requestId) return
+      setDetail({ agent: null, loading: false, error: errorMessage(error) })
+      onError(error)
+    }
+  }
+
+  function closeDetail() {
+    detailRequest.current++
+    setDetail(null)
+  }
+
+  function openToken(agent: Agent) {
+    setTokenAgent(agent)
+    setIssuedToken(null)
+    setTokenVisible(false)
+    setTokenError(null)
+  }
+
+  function closeToken() {
+    if (issuing) return
+    setTokenAgent(null)
+    setIssuedToken(null)
+    setTokenVisible(false)
+    setTokenError(null)
+  }
+
+  async function issueToken() {
+    if (!tokenAgent || issuing) return
+    const agentId = tokenAgent.agentId
+    setIssuing(true)
+    setTokenError(null)
+    try {
+      const result = await api.issueAgentToken(agentId)
+      if (!active.current) return
+      if (result.agentId !== agentId || !result.token) {
+        throw new Error('토큰 응답을 확인하지 못했습니다. Agent 정보를 새로고침해주세요.')
+      }
+      setIssuedToken(result.token)
+      setTokenVisible(false)
+      onNotice('Agent 연결 토큰을 발급했습니다.')
+      onRefresh()
+    } catch (error) {
+      if (!active.current) return
+      setTokenError(errorMessage(error))
+      onError(error)
+    } finally {
+      if (active.current) setIssuing(false)
+    }
+  }
+
+  async function copyToken() {
+    if (!issuedToken) return
+    try {
+      await copyText(issuedToken)
+      if (active.current) onNotice('연결 토큰을 복사했습니다.')
+    } catch {
+      if (active.current) setTokenError('자동 복사를 사용할 수 없습니다. 토큰을 표시한 뒤 직접 선택해 복사해주세요.')
+    }
+  }
+
+  return (
+    <section className="panel agents-panel" aria-labelledby={`${fieldId}-heading`}>
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">TEAM AGENTS</p>
+          <h2 className="section-title" id={`${fieldId}-heading`}>팀의 Agent</h2>
+          <p className="muted">담당 프로젝트와 역할을 한곳에서 확인하세요.</p>
+        </div>
+        <div className="section-actions">
+          <button className="icon-button" type="button" onClick={onRefresh} disabled={loading}
+            aria-label="Agent 목록 새로고침" title="목록 새로고침">
+            <Icon name="refresh" size={18} />
+          </button>
+          <button className="button button-primary" type="button" onClick={openRegister} disabled={loading}>
+            <Icon name="plus" size={18} /> Agent 등록
+          </button>
+        </div>
+      </div>
+
+      <div className="agents-toolbar">
+        <label className="search-field" htmlFor={`${fieldId}-search`}>
+          <Icon name="agent" size={18} />
+          <input id={`${fieldId}-search`} value={search} onChange={(event) => setSearch(event.target.value)}
+            placeholder="Agent, 프로젝트, 역할 검색" type="search" />
+        </label>
+        <span className="muted">{query ? `${visibleAgents.length}개 검색 결과` : `전체 ${teamAgents.length}개`}</span>
+      </div>
+
+      {loading && <p className="loading-copy" role="status">Agent 목록을 불러오고 있습니다.</p>}
+      {!loading && teamAgents.length === 0 ? (
+        <EmptyState icon={<Icon name="agent" size={28} />} title="첫 Agent를 등록해보세요"
+          description="이 팀에서 사용할 내 Agent와 담당 프로젝트를 등록할 수 있습니다." />
+      ) : teamAgents.length > 0 && (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th scope="col">Agent</th><th scope="col">프로젝트</th><th scope="col">도구</th>
+              <th scope="col">소유자</th><th scope="col">연결 상태</th><th scope="col">관리</th></tr></thead>
+            <tbody>
+              {visibleAgents.map((agent) => (
+                <tr key={agent.agentId}>
+                  <td>
+                    <div className="agent-cell">
+                      <span className="agent-icon"><Icon name="agent" size={20} /></span>
+                      <div>
+                        <button className="agent-name-button" type="button" onClick={() => { void showDetail(agent.agentId) }}>
+                          {agent.name}
+                        </button>
+                        <div className="agent-meta">{agent.roleDescription || '역할 미등록'}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>{agent.projectName}</td>
+                  <td><span className="badge badge-tool">{toolName(agent.toolType)}</span></td>
+                  <td>{ownerName(agent)}{agent.ownerUserId === currentUserId && <span className="self-label">나</span>}</td>
+                  <td>
+                    <span className={`badge ${agent.status === 'ONLINE' ? 'badge-online' : 'badge-offline'}`}>
+                      {agent.status === 'ONLINE' ? '온라인' : '오프라인'}
+                    </span>
+                    <div className="status-detail">{agent.lastSeenAt ? formatDate(agent.lastSeenAt) : '접속 기록 없음'}</div>
+                  </td>
+                  <td>
+                    {agent.ownerUserId === currentUserId ? (
+                      <button className="button button-secondary button-small" type="button" onClick={() => openToken(agent)}>
+                        <Icon name="key" size={15} /> 연결 토큰
+                      </button>
+                    ) : <span className="muted">—</span>}
+                  </td>
+                </tr>
+              ))}
+              {visibleAgents.length === 0 && (
+                <tr><td className="empty-table-cell" colSpan={6}>검색 조건에 맞는 Agent가 없습니다.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="field-hint agents-footnote">등록 직후에는 오프라인으로 표시됩니다. 실제 접속 상태는 로컬 연결이 보고된 뒤 반영됩니다.</p>
+
+      {registerOpen && (
+        <Modal title="내 Agent 등록" description={`${team.name} 팀에 등록할 Agent 정보를 입력해주세요.`}
+          busy={registering} onClose={() => { if (!registering) setRegisterOpen(false) }}>
+          <form className="form-stack" onSubmit={(event) => { void registerAgent(event) }}>
+            <div className="field">
+              <label htmlFor={`${fieldId}-name`}>Agent 이름 <span className="required-mark">*</span></label>
+              <input id={`${fieldId}-name`} value={form.name} maxLength={100} required autoFocus
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+                placeholder="예: 프론트엔드 Agent" disabled={registering} />
+            </div>
+            <div className="form-row">
+              <div className="field">
+                <label htmlFor={`${fieldId}-project`}>프로젝트명 <span className="required-mark">*</span></label>
+                <input id={`${fieldId}-project`} value={form.projectName} maxLength={120} required
+                  onChange={(event) => setForm({ ...form, projectName: event.target.value })}
+                  placeholder="예: DevLink Web" disabled={registering} />
+              </div>
+              <div className="field">
+                <label htmlFor={`${fieldId}-tool`}>사용 도구</label>
+                <select id={`${fieldId}-tool`} value={form.toolType} disabled={registering}
+                  onChange={(event) => setForm({ ...form, toolType: event.target.value as AgentForm['toolType'] })}>
+                  <option value="CODEX">Codex</option><option value="CLAUDE_CODE">Claude Code</option>
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor={`${fieldId}-role`}>담당 역할 <span className="muted">선택</span></label>
+              <textarea id={`${fieldId}-role`} value={form.roleDescription} maxLength={255} rows={3}
+                onChange={(event) => setForm({ ...form, roleDescription: event.target.value })}
+                placeholder="예: 화면 구성과 사용자 인증 연동을 담당합니다." disabled={registering} />
+              <span className="field-hint">{form.roleDescription.length}/255자</span>
+            </div>
+            {registerError && <p className="inline-error" role="alert">{registerError}</p>}
+            <div className="modal-footer">
+              <button className="button button-secondary" type="button" disabled={registering} onClick={() => setRegisterOpen(false)}>취소</button>
+              <button className="button button-primary" type="submit" disabled={registering}>
+                {registering ? '등록 중…' : 'Agent 등록'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {detail && (
+        <Modal title="Agent 상세 정보" description="서버에 저장된 Agent 정보를 확인합니다." onClose={closeDetail}>
+          {detail.loading && <p className="loading-copy" role="status">상세 정보를 불러오고 있습니다.</p>}
+          {detail.error && <p className="inline-error" role="alert">{detail.error}</p>}
+          {detail.agent && (
+            <dl className="detail-grid">
+              <div className="detail-item"><dt>Agent 이름</dt><dd>{detail.agent.name}</dd></div>
+              <div className="detail-item"><dt>Agent ID</dt><dd>#{detail.agent.agentId}</dd></div>
+              <div className="detail-item"><dt>프로젝트</dt><dd>{detail.agent.projectName}</dd></div>
+              <div className="detail-item"><dt>도구</dt><dd>{toolName(detail.agent.toolType)}</dd></div>
+              <div className="detail-item"><dt>소유자</dt><dd>{ownerName(detail.agent)}</dd></div>
+              <div className="detail-item"><dt>연결 상태</dt><dd>{detail.agent.status === 'ONLINE' ? '온라인' : '오프라인'}</dd></div>
+              <div className="detail-item"><dt>등록일</dt><dd>{formatDate(detail.agent.createdAt)}</dd></div>
+              <div className="detail-item"><dt>마지막 접속</dt><dd>{detail.agent.lastSeenAt ? formatDate(detail.agent.lastSeenAt) : '접속 기록 없음'}</dd></div>
+              <div className="detail-item detail-item-full"><dt>담당 역할</dt><dd>{detail.agent.roleDescription || '역할 미등록'}</dd></div>
+            </dl>
+          )}
+          <div className="modal-footer"><button className="button button-secondary" type="button" onClick={closeDetail}>닫기</button></div>
+        </Modal>
+      )}
+
+      {tokenAgent && (
+        <Modal title={issuedToken ? '연결 토큰이 발급되었습니다' : 'Agent 연결 토큰'}
+          description={`${tokenAgent.name} · ${tokenAgent.projectName}`} busy={issuing} onClose={closeToken}>
+          {issuedToken ? (
+            <>
+              <p className="token-warning">토큰 원문은 이 화면에서만 확인할 수 있습니다. 창을 닫기 전에 안전한 곳에 보관해주세요.</p>
+              <div className="field">
+                <label htmlFor={`${fieldId}-token`}>발급된 연결 토큰</label>
+                <div className="token-field">
+                  <input id={`${fieldId}-token`} type={tokenVisible ? 'text' : 'password'} value={issuedToken}
+                    readOnly autoComplete="off" spellCheck={false} onFocus={(event) => event.currentTarget.select()} />
+                  <button className="icon-button" type="button" onClick={() => setTokenVisible(!tokenVisible)}
+                    aria-label={tokenVisible ? '토큰 숨기기' : '토큰 표시'} aria-pressed={tokenVisible}>
+                    <Icon name={tokenVisible ? 'eye-off' : 'eye'} size={18} />
+                  </button>
+                  <button className="button button-secondary button-small" type="button" onClick={() => { void copyToken() }}>
+                    <Icon name="copy" size={16} /> 복사
+                  </button>
+                </div>
+              </div>
+              <p className="field-hint">이 화면을 닫으면 토큰을 다시 조회할 수 없습니다. 필요한 경우 새 토큰을 발급해주세요.</p>
+            </>
+          ) : (
+            <>
+              <div className="token-warning"><strong>기존 토큰이 있으면 새 토큰으로 교체됩니다.</strong>
+                <p>이전 토큰은 사용할 수 없고 기존 연결이 종료됩니다. 새 토큰이 필요할 때 발급해주세요.</p></div>
+              <p className="muted">토큰은 이 Agent의 연결 자격정보입니다. 다른 사람에게 공유하거나 공개 저장소에 올리지 마세요.</p>
+            </>
+          )}
+          {tokenError && <p className="inline-error" role="alert">{tokenError}</p>}
+          <div className="modal-footer">
+            <button className="button button-secondary" type="button" disabled={issuing} onClick={closeToken}>{issuedToken ? '닫기' : '취소'}</button>
+            {!issuedToken && <button className="button button-primary" type="button" disabled={issuing} onClick={() => { void issueToken() }}>
+              <Icon name="key" size={16} /> {issuing ? '발급 중…' : '새 연결 토큰 발급'}
+            </button>}
+          </div>
+        </Modal>
+      )}
+    </section>
+  )
+}
