@@ -61,6 +61,9 @@ export default function AgentsPanel({
   const [tokenVisible, setTokenVisible] = useState(false)
   const [issuing, setIssuing] = useState(false)
   const [tokenError, setTokenError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     active.current = true
@@ -175,6 +178,44 @@ export default function AgentsPanel({
     }
   }
 
+  function openDelete(agent: Agent) {
+    if (agent.ownerUserId !== currentUserId || deleting) return
+    setDeleteTarget(agent)
+    setDeleteError(null)
+  }
+
+  function closeDelete() {
+    if (!deleting) setDeleteTarget(null)
+  }
+
+  async function deleteAgent() {
+    if (!deleteTarget || deleting || deleteTarget.ownerUserId !== currentUserId) return
+    const agentId = deleteTarget.agentId
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await api.deleteAgent(agentId)
+      if (!active.current) return
+      detailRequest.current++
+      if (detail?.agent?.agentId === agentId) setDetail(null)
+      if (tokenAgent?.agentId === agentId) {
+        setTokenAgent(null)
+        setIssuedToken(null)
+        setTokenVisible(false)
+        setTokenError(null)
+      }
+      setDeleteTarget(null)
+      onNotice('Agent를 삭제했습니다.')
+      onRefresh()
+    } catch (error) {
+      if (!active.current) return
+      setDeleteError(errorMessage(error))
+      onError(error)
+    } finally {
+      if (active.current) setDeleting(false)
+    }
+  }
+
   async function copyToken() {
     if (!issuedToken) return
     try {
@@ -247,9 +288,15 @@ export default function AgentsPanel({
                   </td>
                   <td>
                     {agent.ownerUserId === currentUserId ? (
-                      <button className="button button-secondary button-small" type="button" onClick={() => openToken(agent)}>
-                        <Icon name="key" size={15} /> 연결 토큰
-                      </button>
+                      <div className="section-actions">
+                        <button className="button button-secondary button-small" type="button" onClick={() => openToken(agent)} disabled={deleting}>
+                          <Icon name="key" size={15} /> 연결 토큰
+                        </button>
+                        <button className="button button-danger button-small" type="button" onClick={() => openDelete(agent)}
+                          disabled={deleting} aria-label={`${agent.name} 삭제`}>
+                          삭제
+                        </button>
+                      </div>
                     ) : <span className="muted">—</span>}
                   </td>
                 </tr>
@@ -262,6 +309,21 @@ export default function AgentsPanel({
         </div>
       )}
       <p className="field-hint agents-footnote">등록 직후에는 오프라인으로 표시됩니다. 실제 접속 상태는 로컬 연결이 보고된 뒤 반영됩니다.</p>
+
+      {deleteTarget && (
+        <Modal title="Agent 삭제" description={`${deleteTarget.name} · ${deleteTarget.projectName}`}
+          busy={deleting} onClose={closeDelete}>
+          <p>이 Agent를 삭제할까요? 삭제하면 기존 연결 토큰을 사용할 수 없고 브로커 연결이 종료됩니다.</p>
+          <p className="field-hint">작업을 요청하거나 받은 이력이 있는 Agent는 삭제할 수 없습니다.</p>
+          {deleteError && <p className="inline-error" role="alert">{deleteError}</p>}
+          <div className="modal-footer">
+            <button className="button button-secondary" type="button" disabled={deleting} onClick={closeDelete}>취소</button>
+            <button className="button button-danger" type="button" disabled={deleting} onClick={() => { void deleteAgent() }}>
+              {deleting ? '삭제 중…' : 'Agent 삭제'}
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {registerOpen && (
         <Modal title="내 Agent 등록" description={`${team.name} 팀에 등록할 Agent 정보를 입력해주세요.`}

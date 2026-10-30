@@ -180,7 +180,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 // 세션 교체와 상태 변경 요청의 순서를 유지하며 자동 재전송 방지
 let mutationQueue: Promise<void> = Promise.resolve()
 
-function post<T>(path: string, body?: unknown): Promise<T> {
+function mutate<T>(method: 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const send = async () => {
     // 로그인·로그아웃 후 바뀐 세션에 맞춰 매 요청마다 CSRF 토큰 조회
     const csrf = await request<CsrfToken>('/auth/csrf')
@@ -189,7 +189,7 @@ function post<T>(path: string, body?: unknown): Promise<T> {
       throw new ApiError('요청 인증 정보를 확인하지 못했습니다. 페이지를 새로고침해주세요.', 0, 'INVALID_CSRF_RESPONSE')
     }
     return request<T>(path, {
-      method: 'POST',
+      method,
       headers: {
         [csrf.headerName]: csrf.token,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -200,6 +200,10 @@ function post<T>(path: string, body?: unknown): Promise<T> {
   const outcome = mutationQueue.then(send, send)
   mutationQueue = outcome.then(() => undefined, () => undefined)
   return outcome
+}
+
+function post<T>(path: string, body?: unknown): Promise<T> {
+  return mutate<T>('POST', path, body)
 }
 
 export const api = {
@@ -223,6 +227,7 @@ export const api = {
   regenerateInvite: (teamId: number) => post<TeamInviteResult>(`/teams/${teamId}/invites`),
   listAgents: (teamId: number) => request<Agent[]>(`/agents/teams/${teamId}`),
   getAgent: (agentId: number) => request<Agent>(`/agents/${agentId}`),
+  deleteAgent: (agentId: number) => mutate<null>('DELETE', `/agents/${agentId}`),
   registerAgent: (teamId: number, input: CreateAgentInput) => post<Agent>(`/agents/teams/${teamId}`, {
     name: input.name.trim(),
     roleDescription: input.roleDescription?.trim() || null,
